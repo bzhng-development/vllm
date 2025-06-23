@@ -59,14 +59,13 @@ from .utils import (AutoWeightsLoader, extract_layer_index,
 
 @torch.compile(backend=current_platform.simple_compile_backend)
 def layer_norm_func(hidden_states, weight, variance_epsilon):
-    input_dtype = hidden_states.dtype
-    hidden_states = hidden_states.to(torch.float32)
-    mean = hidden_states.mean(-1, keepdim=True)
-    variance = (hidden_states - mean).pow(2).mean(-1, keepdim=True)
-    hidden_states = (hidden_states - mean) * torch.rsqrt(variance +
-                                                         variance_epsilon)
-    hidden_states = weight.to(torch.float32) * hidden_states
-    return hidden_states.to(input_dtype)
+    return torch.nn.functional.layer_norm(
+        hidden_states,
+        (hidden_states.shape[-1], ),
+        weight=weight,
+        bias=None,
+        eps=variance_epsilon,
+    )
 
 
 class LayerNorm(nn.Module):
