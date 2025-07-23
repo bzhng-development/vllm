@@ -49,6 +49,44 @@ class ServingScores(OpenAIServing):
                          models=models,
                          request_logger=request_logger)
 
+    async def _truncate_documents_individually(
+        self,
+        tokenizer: AnyTokenizer,
+        documents: Union[list[str], list[ScoreContentPartParam]],
+        max_tokens_per_doc: Optional[int] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
+    ) -> Union[list[str], list[ScoreContentPartParam]]:
+        """Truncate each document individually to max_tokens_per_doc."""
+        if max_tokens_per_doc is None:
+            return documents
+
+        tokenization_kwargs = tokenization_kwargs or {}
+        truncated_documents = []
+
+        tokenize_async = make_async(tokenizer.__call__,
+                                    executor=self._tokenizer_executor)
+
+        for doc in documents:
+            if isinstance(doc, str):
+                # For string documents, tokenize and truncate
+                doc_tokenization_kwargs = tokenization_kwargs.copy() if tokenization_kwargs else {}
+                # Remove any existing truncation-related keys to avoid conflicts
+                doc_tokenization_kwargs.pop('truncation', None)
+                doc_tokenization_kwargs.pop('max_length', None)
+                # Set our per-document truncation parameters
+                doc_tokenization_kwargs['truncation'] = True
+                doc_tokenization_kwargs['max_length'] = max_tokens_per_doc
+                tokenized = await tokenize_async(doc, **doc_tokenization_kwargs)
+                # Decode back to get truncated text, skipping special tokens
+                truncated_text = tokenizer.decode(tokenized["input_ids"], skip_special_tokens=True)
+                truncated_documents.append(truncated_text)
+            else:
+                # For multimodal documents, truncate the text content
+                # This handles ScoreContentPartParam case
+                truncated_documents.append(doc)
+
+        return truncated_documents
+
     async def _embedding_score(
         self,
         tokenizer: AnyTokenizer,
@@ -294,7 +332,7 @@ class ServingScores(OpenAIServing):
         request_id: str,
         raw_request: Optional[Request] = None,
         truncate_prompt_tokens: Optional[int] = None,
-    ) -> Union[list[PoolingRequestOutput], ErrorResponse]:
+    ) -> Union[tuple[list[PoolingRequestOutput], Union[list[str], str, ScoreMultiModalParam]], ErrorResponse]:
         (
             lora_request,
             prompt_adapter_request,
@@ -329,10 +367,23 @@ class ServingScores(OpenAIServing):
         elif isinstance(data_2, dict):
             data_2 = data_2.get("content")  # type: ignore[assignment]
 
+        # Apply per-document truncation if this is a rerank request with max_tokens_per_doc
+        if isinstance(
+                request,
+                RerankRequest) and request.max_tokens_per_doc is not None:
+            # For rerank requests, data_1 is the query (single item) and data_2 is the documents
+            # Only truncate the documents (data_2), not the query (data_1)
+            if isinstance(data_2, list):
+                data_2 = await self._truncate_documents_individually(
+                    tokenizer=tokenizer,
+                    documents=data_2,
+                    max_tokens_per_doc=request.max_tokens_per_doc,
+                    tokenization_kwargs=tokenization_kwargs)
+
         _validate_score_input_lens(data_1, data_2)  # type: ignore[arg-type]
 
         if self.model_config.is_cross_encoder:
-            return await self._cross_encoding_score(
+            scoring_results = await self._cross_encoding_score(
                 tokenizer=tokenizer,
                 data_1=data_1,  # type: ignore[arg-type]
                 data_2=data_2,  # type: ignore[arg-type]
@@ -342,9 +393,8 @@ class ServingScores(OpenAIServing):
                 lora_request=lora_request,
                 prompt_adapter_request=prompt_adapter_request,
                 trace_headers=trace_headers)
-
         else:
-            return await self._embedding_score(
+            scoring_results = await self._embedding_score(
                 tokenizer=tokenizer,
                 texts_1=data_1,  # type: ignore[arg-type]
                 texts_2=data_2,  # type: ignore[arg-type]
@@ -354,6 +404,12 @@ class ServingScores(OpenAIServing):
                 lora_request=lora_request,
                 prompt_adapter_request=prompt_adapter_request,
                 trace_headers=trace_headers)
+
+        if isinstance(scoring_results, ErrorResponse):
+            return scoring_results
+
+        # Return both scoring results and processed documents
+        return scoring_results, data_2
 
     async def create_score(
         self,
@@ -373,7 +429,7 @@ class ServingScores(OpenAIServing):
         created_time = int(time.time())
 
         try:
-            final_res_batch = await self._run_scoring(
+            scoring_result = await self._run_scoring(
                 request.text_1,
                 request.text_2,
                 request,
@@ -381,8 +437,11 @@ class ServingScores(OpenAIServing):
                 raw_request,
                 request.truncate_prompt_tokens,
             )
-            if isinstance(final_res_batch, ErrorResponse):
-                return final_res_batch
+            if isinstance(scoring_result, ErrorResponse):
+                return scoring_result
+
+            # Unpack the tuple: (scoring_results, processed_documents)
+            final_res_batch, _ = scoring_result
 
             return self.request_output_to_score_response(
                 final_res_batch,
@@ -421,7 +480,7 @@ class ServingScores(OpenAIServing):
             if isinstance(documents, list) else len(documents["content"]))
 
         try:
-            final_res_batch = await self._run_scoring(
+            scoring_result = await self._run_scoring(
                 request.query,
                 documents,
                 request,
@@ -429,14 +488,17 @@ class ServingScores(OpenAIServing):
                 raw_request,
                 request.truncate_prompt_tokens,
             )
-            if isinstance(final_res_batch, ErrorResponse):
-                return final_res_batch
+            if isinstance(scoring_result, ErrorResponse):
+                return scoring_result
+
+            # Unpack the tuple: (scoring_results, processed_documents)
+            final_res_batch, processed_documents = scoring_result
 
             return self.request_output_to_rerank_response(
                 final_res_batch,
                 request_id,
                 self._get_model_name(request.model),
-                documents,
+                processed_documents,  # Use processed documents instead of original
                 top_n,
             )
         except asyncio.CancelledError:

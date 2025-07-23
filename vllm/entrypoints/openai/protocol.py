@@ -1356,6 +1356,7 @@ class RerankRequest(OpenAIBaseModel):
     query: Union[str, ScoreMultiModalParam]
     documents: Union[list[str], ScoreMultiModalParam]
     top_n: int = Field(default_factory=lambda: 0)
+    max_tokens_per_doc: Optional[int] = None
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # --8<-- [start:rerank-extra-params]
