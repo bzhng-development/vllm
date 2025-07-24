@@ -68,24 +68,21 @@ class ServingScores(OpenAIServing):
 
         for doc in documents:
             if isinstance(doc, str):
-                # For string documents, tokenize and truncate
                 doc_tokenization_kwargs = tokenization_kwargs.copy(
                 ) if tokenization_kwargs else {}
                 # Remove any existing truncation-related keys to avoid conflicts
                 doc_tokenization_kwargs.pop('truncation', None)
                 doc_tokenization_kwargs.pop('max_length', None)
-                # Set our per-document truncation parameters
                 doc_tokenization_kwargs['truncation'] = True
                 doc_tokenization_kwargs['max_length'] = max_tokens_per_doc
                 tokenized = await tokenize_async(doc,
                                                  **doc_tokenization_kwargs)
-                # Decode back to get truncated text, skipping special tokens
+                # Skip special tokens to avoid EOS and BOS tokens.
                 truncated_text = tokenizer.decode(tokenized["input_ids"],
                                                   skip_special_tokens=True)
                 truncated_documents.append(truncated_text)
             else:
                 # For multimodal documents, truncate the text content
-                # This handles ScoreContentPartParam case
                 truncated_documents.append(doc)
 
         return truncated_documents
@@ -408,7 +405,6 @@ class ServingScores(OpenAIServing):
         if isinstance(scoring_results, ErrorResponse):
             return scoring_results
 
-        # Return both scoring results and processed documents
         return scoring_results, data_2
 
     async def create_score(
@@ -440,7 +436,6 @@ class ServingScores(OpenAIServing):
             if isinstance(scoring_result, ErrorResponse):
                 return scoring_result
 
-            # Unpack the tuple: (scoring_results, processed_documents)
             final_res_batch, _ = scoring_result
 
             return self.request_output_to_score_response(
@@ -491,7 +486,6 @@ class ServingScores(OpenAIServing):
             if isinstance(scoring_result, ErrorResponse):
                 return scoring_result
 
-            # Unpack the tuple: (scoring_results, processed_documents)
             final_res_batch, processed_documents = scoring_result
 
             return self.request_output_to_rerank_response(
