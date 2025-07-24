@@ -100,32 +100,38 @@ def test_rerank_max_model_len(server: RemoteOpenAIServer, model_name: str):
 def test_max_tokens_per_doc(server: RemoteOpenAIServer, model_name: str):
     query = "programming languages"
     documents = [
-        "Python is a high-level programming language known for its simplicity and readability",
-        "JavaScript is a versatile programming language primarily used for web development",
-        "Rust is a systems programming language focused on safety and performance"
+        "Python is a high-level programming language known for its "
+        "simplicity and readability",
+        "JavaScript is a versatile programming language primarily used "
+        "for web development",
+        "Rust is a systems programming language focused on safety "
+        "and performance"
     ]
-    
-    response_full = requests.post(server.url_for("rerank"), json={
-        "model": model_name,
-        "query": query,
-        "documents": documents,
-    })
+
+    response_full = requests.post(server.url_for("rerank"),
+                                  json={
+                                      "model": model_name,
+                                      "query": query,
+                                      "documents": documents,
+                                  })
     response_full.raise_for_status()
-    
-    response_truncated = requests.post(server.url_for("rerank"), json={
-        "model": model_name,
-        "query": query,
-        "documents": documents,
-        "max_tokens_per_doc": 4
-    })
+
+    response_truncated = requests.post(server.url_for("rerank"),
+                                       json={
+                                           "model": model_name,
+                                           "query": query,
+                                           "documents": documents,
+                                           "max_tokens_per_doc": 4
+                                       })
     response_truncated.raise_for_status()
-    
+
     full_results = response_full.json()["results"]
     truncated_results = response_truncated.json()["results"]
-    
+
     for full_doc, truncated_doc in zip(full_results, truncated_results):
-        assert len(truncated_doc["document"]["text"]) < len(full_doc["document"]["text"])
-    
+        assert len(truncated_doc["document"]["text"]) < len(
+            full_doc["document"]["text"])
+
     assert len(truncated_results) == 3
 
 

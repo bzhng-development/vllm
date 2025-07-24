@@ -69,16 +69,19 @@ class ServingScores(OpenAIServing):
         for doc in documents:
             if isinstance(doc, str):
                 # For string documents, tokenize and truncate
-                doc_tokenization_kwargs = tokenization_kwargs.copy() if tokenization_kwargs else {}
+                doc_tokenization_kwargs = tokenization_kwargs.copy(
+                ) if tokenization_kwargs else {}
                 # Remove any existing truncation-related keys to avoid conflicts
                 doc_tokenization_kwargs.pop('truncation', None)
                 doc_tokenization_kwargs.pop('max_length', None)
                 # Set our per-document truncation parameters
                 doc_tokenization_kwargs['truncation'] = True
                 doc_tokenization_kwargs['max_length'] = max_tokens_per_doc
-                tokenized = await tokenize_async(doc, **doc_tokenization_kwargs)
+                tokenized = await tokenize_async(doc,
+                                                 **doc_tokenization_kwargs)
                 # Decode back to get truncated text, skipping special tokens
-                truncated_text = tokenizer.decode(tokenized["input_ids"], skip_special_tokens=True)
+                truncated_text = tokenizer.decode(tokenized["input_ids"],
+                                                  skip_special_tokens=True)
                 truncated_documents.append(truncated_text)
             else:
                 # For multimodal documents, truncate the text content
@@ -332,7 +335,8 @@ class ServingScores(OpenAIServing):
         request_id: str,
         raw_request: Optional[Request] = None,
         truncate_prompt_tokens: Optional[int] = None,
-    ) -> Union[tuple[list[PoolingRequestOutput], Union[list[str], str, ScoreMultiModalParam]], ErrorResponse]:
+    ) -> Union[tuple[list[PoolingRequestOutput], Union[
+            list[str], str, ScoreMultiModalParam]], ErrorResponse]:
         (
             lora_request,
             prompt_adapter_request,
@@ -367,18 +371,14 @@ class ServingScores(OpenAIServing):
         elif isinstance(data_2, dict):
             data_2 = data_2.get("content")  # type: ignore[assignment]
 
-        # Apply per-document truncation if this is a rerank request with max_tokens_per_doc
-        if isinstance(
-                request,
-                RerankRequest) and request.max_tokens_per_doc is not None:
-            # For rerank requests, data_1 is the query (single item) and data_2 is the documents
-            # Only truncate the documents (data_2), not the query (data_1)
-            if isinstance(data_2, list):
-                data_2 = await self._truncate_documents_individually(
-                    tokenizer=tokenizer,
-                    documents=data_2,
-                    max_tokens_per_doc=request.max_tokens_per_doc,
-                    tokenization_kwargs=tokenization_kwargs)
+        if (isinstance(request, RerankRequest)
+                and request.max_tokens_per_doc is not None
+                and isinstance(data_2, list)):
+            data_2 = await self._truncate_documents_individually(
+                tokenizer=tokenizer,
+                documents=data_2,
+                max_tokens_per_doc=request.max_tokens_per_doc,
+                tokenization_kwargs=tokenization_kwargs)
 
         _validate_score_input_lens(data_1, data_2)  # type: ignore[arg-type]
 
@@ -498,7 +498,7 @@ class ServingScores(OpenAIServing):
                 final_res_batch,
                 request_id,
                 self._get_model_name(request.model),
-                processed_documents,  # Use processed documents instead of original
+                processed_documents,
                 top_n,
             )
         except asyncio.CancelledError:
