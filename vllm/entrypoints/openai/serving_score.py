@@ -61,12 +61,13 @@ class ServingScores(OpenAIServing):
             return documents
 
         tokenization_kwargs = tokenization_kwargs or {}
-        truncated_documents = []
-
         tokenize_async = make_async(tokenizer.__call__,
                                     executor=self._tokenizer_executor)
 
-        for doc in documents:
+        async def _process_doc(
+            doc: Union[str, ScoreContentPartParam]
+        ) -> Union[str, ScoreContentPartParam]:
+            """Process a single document with truncation."""
             if isinstance(doc, str):
                 doc_tokenization_kwargs = tokenization_kwargs.copy(
                 ) if tokenization_kwargs else {}
@@ -80,10 +81,14 @@ class ServingScores(OpenAIServing):
                 # Skip special tokens to avoid EOS and BOS tokens.
                 truncated_text = tokenizer.decode(tokenized["input_ids"],
                                                   skip_special_tokens=True)
-                truncated_documents.append(truncated_text)
+                return truncated_text
             else:
-                # For multimodal documents, truncate the text content
-                truncated_documents.append(doc)
+                #TODO(b8zhong): handle multi-modal.
+                return doc
+
+        # Process all documents concurrently
+        tasks = [_process_doc(doc) for doc in documents]
+        truncated_documents = await asyncio.gather(*tasks)
 
         return truncated_documents
 
