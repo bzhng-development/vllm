@@ -156,61 +156,81 @@ class DualChunkFlashAttentionMetadata(FlashAttentionMetadata):
 
         cache_seq_lens = decode_metadata.orig_seq_lens_tensor
         chunk_len = self.chunk_size - self.local_size
-        chunk_num_curr = (cache_seq_lens - 1) // chunk_len
+        chunk_len_pages = max(1, chunk_len // self.block_size)
         batch_size = decode_metadata.num_decode_tokens
+
+        # Prefer CPU view for reductions and scalar math to avoid GPU syncs
+        cache_seq_lens_cpu = cache_seq_lens.cpu()
+        chunk_num_curr = (cache_seq_lens - 1) // chunk_len
+        chunk_num_curr_cpu = (cache_seq_lens_cpu - 1) // chunk_len
 
         if self.original_max_position_embeddings > 0:
             decode_metadata.scaling_factor = (0.1 * torch.log(
                 cache_seq_lens / self.original_max_position_embeddings) +
                                               1.0).clip(min=1)
 
+        # Intra lengths - compute max on CPU to avoid device sync
         seq_lens_intra = cache_seq_lens - chunk_num_curr * chunk_len
-        max_seq_len_intra = seq_lens_intra.max().item()
+        max_seq_len_intra = int((cache_seq_lens_cpu - chunk_num_curr_cpu * chunk_len).max().item())
         decode_metadata.seq_lens_intra = seq_lens_intra
         decode_metadata.max_seq_len_intra = max_seq_len_intra
 
-        block_tables_intra = torch.zeros(
-            batch_size,
-            (max_seq_len_intra - 1) // self.block_size + 1,
-            dtype=decode_metadata.block_tables.dtype,
-            device=decode_metadata.block_tables.device,
-        )
-        for i in range(batch_size):
-            st = chunk_num_curr[i] * chunk_len // self.block_size
-            ed = min(
-                st + (max_seq_len_intra - 1) // self.block_size + 1,
-                (cache_seq_lens[i] - 1) // self.block_size + 1,
-            )
-            block_tables_intra[i, :ed -
-                               st] = decode_metadata.block_tables[i, st:ed]
-        decode_metadata.block_tables_intra = block_tables_intra
-
-        seq_lens_succ = (chunk_num_curr -
-                         (chunk_num_curr - 1).clip(min=0)) * chunk_len
-        max_seq_len_succ = seq_lens_succ.max().item()
-        decode_metadata.seq_lens_succ = seq_lens_succ
-        decode_metadata.max_seq_len_succ = max_seq_len_succ
-        if max_seq_len_succ:
-            block_tables_succ = torch.zeros(
+        # Prepare intra block tables; zero only the columns we will use
+        intra_cols = (max_seq_len_intra - 1) // self.block_size + 1 if max_seq_len_intra > 0 else 0
+        if intra_cols > 0:
+            block_tables_intra = torch.zeros(
                 batch_size,
-                (max_seq_len_succ - 1) // self.block_size + 1,
+                intra_cols,
                 dtype=decode_metadata.block_tables.dtype,
                 device=decode_metadata.block_tables.device,
             )
             for i in range(batch_size):
-                start = ((chunk_num_curr[i] - 1).clip(min=0) * chunk_len //
-                         self.block_size)
-                end = min(
-                    start + (max_seq_len_succ - 1) // self.block_size + 1,
-                    (cache_seq_lens[i] - 1) // self.block_size + 1,
-                )
-                block_tables_succ[
-                    i, :end - start] = decode_metadata.block_tables[i,
-                                                                    start:end]
+                # Use CPU integers to avoid per-iteration GPU sync
+                st_pages = int(chunk_num_curr_cpu[i].item()) * chunk_len_pages
+                end_pages_cap = int((cache_seq_lens_cpu[i].item() - 1) // self.block_size + 1)
+                ed_pages = min(st_pages + intra_cols, end_pages_cap)
+                if ed_pages > st_pages:
+                    block_tables_intra[i, : ed_pages - st_pages] = decode_metadata.block_tables[
+                        i, st_pages:ed_pages
+                    ]
+        else:
+            block_tables_intra = torch.zeros(
+                batch_size,
+                1,
+                dtype=decode_metadata.block_tables.dtype,
+                device=decode_metadata.block_tables.device,
+            )
+        decode_metadata.block_tables_intra = block_tables_intra
+
+        # Successor lengths
+        seq_lens_succ = (chunk_num_curr - (chunk_num_curr - 1).clip(min=0)) * chunk_len
+        seq_lens_succ_cpu = (chunk_num_curr_cpu - (chunk_num_curr_cpu - 1).clamp(min=0)) * chunk_len
+        max_seq_len_succ = int(seq_lens_succ_cpu.max().item())
+        decode_metadata.seq_lens_succ = seq_lens_succ
+        decode_metadata.max_seq_len_succ = max_seq_len_succ
+        
+        if max_seq_len_succ:
+            succ_cols = (max_seq_len_succ - 1) // self.block_size + 1
+            block_tables_succ = torch.zeros(
+                batch_size,
+                succ_cols,
+                dtype=decode_metadata.block_tables.dtype,
+                device=decode_metadata.block_tables.device,
+            )
+            for i in range(batch_size):
+                prev_chunks = int(max(chunk_num_curr_cpu[i].item() - 1, 0))
+                start_pages = prev_chunks * chunk_len_pages
+                end_pages_cap = int((cache_seq_lens_cpu[i].item() - 1) // self.block_size + 1)
+                end_pages = min(start_pages + succ_cols, end_pages_cap)
+                if end_pages > start_pages:
+                    block_tables_succ[i, : end_pages - start_pages] = decode_metadata.block_tables[
+                        i, start_pages:end_pages
+                    ]
             decode_metadata.block_tables_succ = block_tables_succ
 
+        # Inter lengths
         seq_lens_inter = (chunk_num_curr - 1).clip(min=0) * chunk_len
-        max_seq_len_inter = seq_lens_inter.max().item()
+        max_seq_len_inter = int(((chunk_num_curr_cpu - 1).clamp(min=0) * chunk_len).max().item())
         decode_metadata.seq_lens_inter = seq_lens_inter
         decode_metadata.max_seq_len_inter = max_seq_len_inter
 
@@ -1349,7 +1369,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                     query_inter,
                     key_cache,
                     value_cache,
-                    block_table[:, :decode_meta.max_seq_len_inter],
+                    block_table,
                     decode_meta.seq_lens_inter,
                     softmax_scale,
                     alibi_slopes,
